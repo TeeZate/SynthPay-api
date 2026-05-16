@@ -101,8 +101,9 @@ export const merchantRoutes = async (server: FastifyInstance) => {
       .limit(50)
 
     const endpoints = await db('endpoints')
-      .where({ merchant_id: merchant.id, active: true })
+      .where({ merchant_id: merchant.id })
       .select('id', 'path', 'price', 'active', 'service_name', 'description', 'category')
+      .orderBy('created_at', 'asc')
 
     const today = new Date()
     today.setHours(0, 0, 0, 0)
@@ -123,6 +124,65 @@ export const merchantRoutes = async (server: FastifyInstance) => {
       },
       endpoints,
       recent_transactions: transactions
+    })
+  })
+
+  // ── Update an endpoint (price, active, service_name, description, category) ─
+  server.patch('/merchants/endpoints/:id', async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const { api_key, price, active, service_name, description, category } = request.body as {
+      api_key:       string
+      price?:        number
+      active?:       boolean
+      service_name?: string
+      description?:  string
+      category?:     string
+    }
+
+    if (!api_key) {
+      return reply.status(401).send({ error: 'API key required' })
+    }
+
+    const merchant = await db('merchants')
+      .where({ api_key, active: true })
+      .first()
+
+    if (!merchant) {
+      return reply.status(401).send({ error: 'Invalid API key' })
+    }
+
+    // Verify the endpoint belongs to this merchant
+    const endpoint = await db('endpoints')
+      .where({ id, merchant_id: merchant.id })
+      .first()
+
+    if (!endpoint) {
+      return reply.status(404).send({ error: 'Endpoint not found' })
+    }
+
+    // Build update payload — only include provided fields
+    const updates: Record<string, any> = {}
+    if (price !== undefined) {
+      if (price <= 0) return reply.status(400).send({ error: 'Price must be greater than 0' })
+      updates.price = Number(price.toFixed(8))
+    }
+    if (active !== undefined) updates.active = active
+    if (service_name !== undefined) updates.service_name = service_name.trim()
+    if (description  !== undefined) updates.description  = description.trim()
+    if (category     !== undefined) updates.category     = category.trim()
+
+    if (Object.keys(updates).length === 0) {
+      return reply.status(400).send({ error: 'No fields to update' })
+    }
+
+    const [updated] = await db('endpoints')
+      .where({ id })
+      .update(updates)
+      .returning(['id', 'path', 'price', 'active', 'service_name', 'description', 'category'])
+
+    return reply.send({
+      message:  'Endpoint updated',
+      endpoint: updated
     })
   })
 
