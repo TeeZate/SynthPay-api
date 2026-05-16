@@ -10,10 +10,12 @@ import jwt from 'jsonwebtoken'
 import { randomBytes, randomInt } from 'crypto'
 
 const RP_NAME    = 'SynthPay'
-const RP_ID      = process.env.WEBAUTHN_RPID   || 'localhost'
-const ORIGIN     = process.env.WEBAUTHN_ORIGIN || 'http://localhost:3000'
-const JWT_SECRET = process.env.JWT_SECRET      || 'changeme'
-const OTP_EXPIRY = 10 * 60 * 1000             // 10 minutes
+const RP_ID      = process.env.WEBAUTHN_RPID     || 'localhost'
+const ORIGIN     = process.env.WEBAUTHN_ORIGIN   || 'http://localhost:3000'
+const NEW_RPID   = process.env.WEBAUTHN_NEW_RPID || 'wallet.synthpay.tech'
+const NEW_ORIGIN = process.env.WEBAUTHN_NEW_ORIGIN || 'https://wallet.synthpay.tech'
+const JWT_SECRET = process.env.JWT_SECRET        || 'changeme'
+const OTP_EXPIRY = 10 * 60 * 1000              // 10 minutes
 
 // ── Helper: clean expired challenges ─────────────────────────────────────────
 const cleanChallenges = async () => {
@@ -26,7 +28,6 @@ const generateOTP = (): string => {
 }
 
 // ── Helper: send OTP email ────────────────────────────────────────────────────
-// Currently logs to console — replace with Resend when Block 22 is built
 const sendOTPEmail = async (email: string, otp: string, userId: string) => {
   console.log(`
   ==========================================
@@ -37,13 +38,6 @@ const sendOTPEmail = async (email: string, otp: string, userId: string) => {
   Expires: ${new Date(Date.now() + OTP_EXPIRY).toISOString()}
   ==========================================
   `)
-  // TODO Block 22: Replace with Resend email
-  // await resend.emails.send({
-  //   from: 'noreply@synthpay.io',
-  //   to: email,
-  //   subject: 'Your SynthPay login code',
-  //   html: `<h2>Your login code is: <strong>${otp}</strong></h2><p>Expires in 10 minutes.</p>`
-  // })
 }
 
 export const authRoutes = async (server: FastifyInstance) => {
@@ -145,11 +139,15 @@ export const authRoutes = async (server: FastifyInstance) => {
   })
 
   // ── 2.04 LOGIN BEGIN ──────────────────────────────────────────────────────
+  // Detects origin header to serve the correct rpId for the calling domain
   server.post('/auth/login/begin', async (request, reply) => {
     await cleanChallenges()
 
+    const origin = (request.headers.origin as string) || ''
+    const activeRpId = origin === NEW_ORIGIN ? NEW_RPID : RP_ID
+
     const options = await generateAuthenticationOptions({
-      rpID:             RP_ID,
+      rpID:             activeRpId,
       userVerification: 'required',
     })
 
@@ -164,6 +162,7 @@ export const authRoutes = async (server: FastifyInstance) => {
   })
 
   // ── 2.05 LOGIN COMPLETE ───────────────────────────────────────────────────
+  // Tries both old and new rpId/origin pairs so credentials from either domain work
   server.post('/auth/login/complete', async (request, reply) => {
     const { credential } = request.body as { credential: any }
 
@@ -193,25 +192,34 @@ export const authRoutes = async (server: FastifyInstance) => {
       return reply.status(404).send({ error: 'Passkey not found' })
     }
 
+    // Try verifying against old domain first, then new domain
+    const attempts = [
+      { origin: ORIGIN,     rpId: RP_ID     },
+      { origin: NEW_ORIGIN, rpId: NEW_RPID  },
+    ]
+
     let verification: any
-    try {
-      verification = await verifyAuthenticationResponse({
-        response:          credential,
-        expectedChallenge: stored.challenge,
-        expectedOrigin:    ORIGIN,
-        expectedRPID:      RP_ID,
-        credential: {
-          id:        passkey.credential_id,
-          publicKey: new Uint8Array(Buffer.from(passkey.public_key, 'base64')),
-          counter:   passkey.counter,
-        },
-        requireUserVerification: true,
-      })
-    } catch (err: any) {
-      return reply.status(400).send({ error: err.message })
+    for (const attempt of attempts) {
+      try {
+        verification = await verifyAuthenticationResponse({
+          response:          credential,
+          expectedChallenge: stored.challenge,
+          expectedOrigin:    attempt.origin,
+          expectedRPID:      attempt.rpId,
+          credential: {
+            id:        passkey.credential_id,
+            publicKey: new Uint8Array(Buffer.from(passkey.public_key, 'base64')),
+            counter:   passkey.counter,
+          },
+          requireUserVerification: true,
+        })
+        if (verification.verified) break
+      } catch {
+        // try next
+      }
     }
 
-    if (!verification.verified) {
+    if (!verification?.verified) {
       return reply.status(401).send({ error: 'Authentication failed' })
     }
 
@@ -233,9 +241,152 @@ export const authRoutes = async (server: FastifyInstance) => {
     })
   })
 
+  // ── PASSKEY MIGRATION ─────────────────────────────────────────────────────
+  // Allows existing users to add a new passkey bound to wallet.synthpay.tech
+  // without losing their account or balance.
+  //
+  // Flow:
+  //   1. User logs in at synthpay-wallet.vercel.app (old domain)
+  //   2. Calls /auth/migration-token → gets a 10-min scoped token
+  //   3. Redirected to wallet.synthpay.tech/migrate?token=<token>
+  //   4. /auth/migrate/begin  → registration options for wallet.synthpay.tech
+  //   5. /auth/migrate/complete → new passkey added to existing account
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // Step 1: Issue a short-lived migration token (requires current session JWT)
+  server.post('/auth/migration-token', async (request, reply) => {
+    const auth = request.headers.authorization as string
+    if (!auth?.startsWith('Bearer ')) {
+      return reply.status(401).send({ error: 'Unauthorized' })
+    }
+
+    let payload: any
+    try {
+      payload = jwt.verify(auth.slice(7), JWT_SECRET)
+    } catch {
+      return reply.status(401).send({ error: 'Invalid or expired session token' })
+    }
+
+    const migrationToken = jwt.sign(
+      { user_id: payload.user_id, purpose: 'migration' },
+      JWT_SECRET,
+      { expiresIn: '10m' }
+    )
+
+    return reply.send({ token: migrationToken })
+  })
+
+  // Step 2: Begin registration for new domain
+  server.post('/auth/migrate/begin', async (request, reply) => {
+    const { token } = request.body as { token: string }
+
+    if (!token) return reply.status(400).send({ error: 'token required' })
+
+    let payload: any
+    try {
+      payload = jwt.verify(token, JWT_SECRET)
+      if (payload.purpose !== 'migration') throw new Error('wrong purpose')
+    } catch {
+      return reply.status(401).send({ error: 'Invalid or expired migration token' })
+    }
+
+    const user = await db('users').where({ id: payload.user_id }).first()
+    if (!user) return reply.status(404).send({ error: 'User not found' })
+
+    const options = await generateRegistrationOptions({
+      rpName:          RP_NAME,
+      rpID:            NEW_RPID,
+      userID:          Buffer.from(payload.user_id),
+      userName:        `user_${payload.user_id.slice(0, 8)}`,
+      userDisplayName: user.display_name || 'SynthPay User',
+      attestationType: 'none',
+      authenticatorSelection: {
+        authenticatorAttachment: 'platform',
+        userVerification:        'required',
+        residentKey:             'preferred',
+      },
+      supportedAlgorithmIDs: [-7, -257],
+    })
+
+    await db('challenges').insert({
+      challenge:  options.challenge,
+      type:       'migration',
+      user_id:    payload.user_id,
+      expires_at: new Date(Date.now() + 5 * 60 * 1000),
+    })
+
+    return reply.send({ options })
+  })
+
+  // Step 3: Complete registration — adds passkey to existing user, issues new JWT
+  server.post('/auth/migrate/complete', async (request, reply) => {
+    const { token, credential } = request.body as { token: string; credential: any }
+
+    if (!token || !credential) {
+      return reply.status(400).send({ error: 'token and credential required' })
+    }
+
+    let payload: any
+    try {
+      payload = jwt.verify(token, JWT_SECRET)
+      if (payload.purpose !== 'migration') throw new Error('wrong purpose')
+    } catch {
+      return reply.status(401).send({ error: 'Invalid or expired migration token' })
+    }
+
+    const stored = await db('challenges')
+      .where({ type: 'migration', user_id: payload.user_id })
+      .where('expires_at', '>', new Date())
+      .orderBy('created_at', 'desc')
+      .first()
+
+    if (!stored) {
+      return reply.status(400).send({ error: 'Challenge expired or not found' })
+    }
+
+    let verification: any
+    try {
+      verification = await verifyRegistrationResponse({
+        response:                credential,
+        expectedChallenge:       stored.challenge,
+        expectedOrigin:          NEW_ORIGIN,
+        expectedRPID:            NEW_RPID,
+        requireUserVerification: true,
+      })
+    } catch (err: any) {
+      return reply.status(400).send({ error: err.message })
+    }
+
+    if (!verification.verified || !verification.registrationInfo) {
+      return reply.status(400).send({ error: 'Verification failed' })
+    }
+
+    const { credential: cred } = verification.registrationInfo
+
+    // Add new passkey to the EXISTING user — no new account created
+    await db('passkeys').insert({
+      user_id:       payload.user_id,
+      credential_id: cred.id,
+      public_key:    Buffer.from(cred.publicKey).toString('base64'),
+      counter:       cred.counter,
+      device_type:   verification.registrationInfo.credentialDeviceType || 'unknown',
+    })
+
+    await db('challenges').where({ challenge: stored.challenge }).delete()
+
+    const user = await db('users').where({ id: payload.user_id }).first()
+    const newToken = jwt.sign({ user_id: payload.user_id }, JWT_SECRET, { expiresIn: '24h' })
+
+    return reply.send({
+      message: 'Passkey added for wallet.synthpay.tech — you can now sign in on this domain.',
+      user_id: payload.user_id,
+      balance: Number(user.balance),
+      token:   newToken,
+    })
+  })
+
   // ── EMAIL RECOVERY ROUTES ─────────────────────────────────────────────────
 
-  // Link email to existing wallet (call after passkey login)
   server.post('/auth/email/link', async (request, reply) => {
     const { user_id, email } = request.body as { user_id: string; email: string }
 
@@ -245,7 +396,6 @@ export const authRoutes = async (server: FastifyInstance) => {
 
     const emailLower = email.toLowerCase().trim()
 
-    // Check email not already used by another user
     const existing = await db('users')
       .where({ email: emailLower })
       .whereNot({ id: user_id })
@@ -263,7 +413,6 @@ export const authRoutes = async (server: FastifyInstance) => {
     })
   })
 
-  // Check if email is linked to a wallet
   server.post('/auth/email/check', async (request, reply) => {
     const { email } = request.body as { email: string }
     if (!email) return reply.status(400).send({ error: 'email required' })
@@ -275,7 +424,6 @@ export const authRoutes = async (server: FastifyInstance) => {
     return reply.send({ exists: !!user })
   })
 
-  // Request OTP — send code to email
   server.post('/auth/email/request', async (request, reply) => {
     const { email } = request.body as { email: string }
 
@@ -285,17 +433,14 @@ export const authRoutes = async (server: FastifyInstance) => {
 
     const emailLower = email.toLowerCase().trim()
 
-    // Find user by email
     const user = await db('users').where({ email: emailLower }).first()
     if (!user) {
-      // Don't reveal if email exists — security best practice
       return reply.send({
         success: true,
         message: 'If that email is linked to a wallet, a code has been sent.'
       })
     }
 
-    // Rate limit — max 3 OTPs per 10 minutes per email
     const recentCount = await db('email_otps')
       .where({ email: emailLower })
       .where('created_at', '>', new Date(Date.now() - 10 * 60 * 1000))
@@ -308,12 +453,10 @@ export const authRoutes = async (server: FastifyInstance) => {
       })
     }
 
-    // Invalidate previous OTPs for this email
     await db('email_otps')
       .where({ email: emailLower, used: false })
       .update({ used: true })
 
-    // Generate and store new OTP
     const otp = generateOTP()
     await db('email_otps').insert({
       email:      emailLower,
@@ -323,18 +466,15 @@ export const authRoutes = async (server: FastifyInstance) => {
       used:       false
     })
 
-    // Send email (currently logs to console)
     await sendOTPEmail(emailLower, otp, user.id)
 
     return reply.send({
       success: true,
       message: 'If that email is linked to a wallet, a code has been sent.',
-      // In development — remove in production
       ...(process.env.NODE_ENV === 'development' ? { dev_otp: otp } : {})
     })
   })
 
-  // Verify OTP — returns JWT on success
   server.post('/auth/email/verify', async (request, reply) => {
     const { email, otp } = request.body as { email: string; otp: string }
 
@@ -344,7 +484,6 @@ export const authRoutes = async (server: FastifyInstance) => {
 
     const emailLower = email.toLowerCase().trim()
 
-    // Find valid OTP
     const record = await db('email_otps')
       .where({
         email: emailLower,
@@ -358,16 +497,13 @@ export const authRoutes = async (server: FastifyInstance) => {
       return reply.status(401).send({ error: 'Invalid or expired code. Please request a new one.' })
     }
 
-    // Mark OTP as used — can only be used once
     await db('email_otps').where({ id: record.id }).update({ used: true })
 
-    // Get user
     const user = await db('users').where({ id: record.user_id }).first()
     if (!user) {
       return reply.status(404).send({ error: 'User not found' })
     }
 
-    // Issue JWT — same as passkey login
     const token = jwt.sign({ user_id: user.id }, JWT_SECRET, { expiresIn: '24h' })
 
     return reply.send({
