@@ -89,7 +89,7 @@ export const walletRoutes = async (server: FastifyInstance) => {
           user_id,
           amount_added:   Number(existing.amount),
           new_balance:    Number(currentUser?.balance || 0),
-          message:        'Wallet credited successfully',
+          message:        'Account credited successfully',
           idempotent:     true  // signals this was a duplicate, not a new charge
         })
       }

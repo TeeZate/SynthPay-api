@@ -173,7 +173,7 @@ export const authRoutes = async (server: FastifyInstance) => {
     const token = jwt.sign({ user_id: user.id }, JWT_SECRET, { expiresIn: '24h' })
 
     return reply.status(201).send({
-      message: 'Wallet created successfully',
+      message: 'Account created successfully',
       user_id: user.id,
       balance: Number(user.balance),
       token,
@@ -271,7 +271,7 @@ export const authRoutes = async (server: FastifyInstance) => {
 
   // ── EMAIL RECOVERY ROUTES ─────────────────────────────────────────────────
 
-  // Link email to existing wallet (call after passkey login)
+  // Link email to existing account (call after passkey login)
   server.post('/auth/email/link', async (request, reply) => {
     const { user_id, email } = request.body as { user_id: string; email: string }
 
@@ -288,18 +288,18 @@ export const authRoutes = async (server: FastifyInstance) => {
       .first()
 
     if (existing) {
-      return reply.status(409).send({ error: 'Email already linked to another wallet' })
+      return reply.status(409).send({ error: 'Email already linked to another account' })
     }
 
     await db('users').where({ id: user_id }).update({ email: emailLower })
 
     return reply.send({
       success: true,
-      message: 'Email linked to wallet. You can now use it for cross-device login.'
+      message: 'Email linked to account. You can now use it for cross-device login.'
     })
   })
 
-  // Check if email is linked to a wallet
+  // Check if email is linked to an account
   server.post('/auth/email/check', async (request, reply) => {
     const { email } = request.body as { email: string }
     if (!email) return reply.status(400).send({ error: 'email required' })
@@ -327,7 +327,7 @@ export const authRoutes = async (server: FastifyInstance) => {
       // Don't reveal if email exists — security best practice
       return reply.send({
         success: true,
-        message: 'If that email is linked to a wallet, a code has been sent.'
+        message: 'If that email is linked to an account, a code has been sent.'
       })
     }
 
