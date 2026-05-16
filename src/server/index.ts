@@ -6,6 +6,8 @@ import dotenv from 'dotenv'
 import { resolve } from 'path'
 import { readFileSync } from 'fs'
 import { testConnection } from '../db/index'
+import { runMigrations } from '../db/migrations'
+import { runSeed } from '../db/seed'
 import { merchantRoutes } from './routes/merchants'
 import { adminRoutes } from './routes/admin'
 import { userRoutes } from './routes/users'
@@ -72,6 +74,10 @@ const start = async () => {
       encoding: 'utf8',
       runFirst: true
     })
+
+    // Run migrations + seed on every startup (both are idempotent)
+    await runMigrations()
+    await runSeed()
 
     // Health check
     server.get('/health', async () => {

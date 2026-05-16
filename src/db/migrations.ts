@@ -68,9 +68,23 @@ export const runMigrations = async () => {
       t.string('path').notNullable()
       t.decimal('price', 18, 8).notNullable()
       t.boolean('active').notNullable().defaultTo(true)
+      t.string('service_name').nullable()
+      t.text('description').nullable()
+      t.string('category').nullable().defaultTo('General')
       t.timestamps(true, true)
     })
     console.log('✅ endpoints table created')
+  } else {
+    // Add missing columns to existing endpoints table
+    const hasServiceName = await db.schema.hasColumn('endpoints', 'service_name')
+    if (!hasServiceName) {
+      await db.schema.alterTable('endpoints', (t) => {
+        t.string('service_name').nullable()
+        t.text('description').nullable()
+        t.string('category').nullable().defaultTo('General')
+      })
+      console.log('✅ endpoints: added service_name, description, category columns')
+    }
   }
 
   // 5. LEDGER — append only, never update never delete
