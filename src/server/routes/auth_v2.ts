@@ -17,9 +17,13 @@ const resend = process.env.RESEND_API_KEY
 const FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'SynthPay <noreply@synthpay.io>'
 
 const RP_NAME    = 'SynthPay'
-const RP_ID      = process.env.WEBAUTHN_RPID   || 'localhost'
-const ORIGIN     = process.env.WEBAUTHN_ORIGIN || 'http://localhost:3000'
-const JWT_SECRET = process.env.JWT_SECRET      || 'changeme'
+const RP_ID      = process.env.WEBAUTHN_RPID        || 'localhost'
+const ORIGIN     = process.env.WEBAUTHN_ORIGIN      || 'http://localhost:3000'
+const NEW_RPID   = process.env.WEBAUTHN_NEW_RPID    || 'wallet.synthpay.tech'
+const NEW_ORIGIN = process.env.WEBAUTHN_NEW_ORIGIN  || 'https://wallet.synthpay.tech'
+const ACCT_RPID  = process.env.WEBAUTHN_ACCT_RPID   || 'account.synthpay.tech'
+const ACCT_ORIGIN= process.env.WEBAUTHN_ACCT_ORIGIN || 'https://account.synthpay.tech'
+const JWT_SECRET = process.env.JWT_SECRET            || 'changeme'
 const OTP_EXPIRY = 10 * 60 * 1000             // 10 minutes
 
 // ── Helper: clean expired challenges ─────────────────────────────────────────
@@ -88,11 +92,16 @@ export const authRoutes = async (server: FastifyInstance) => {
   server.post('/auth/register/begin', async (request, reply) => {
     await cleanChallenges()
 
+    const origin = (request.headers.origin as string) || ''
+    const activeRpId = origin === ACCT_ORIGIN ? ACCT_RPID
+                     : origin === NEW_ORIGIN  ? NEW_RPID
+                     : RP_ID
+
     const userId = randomBytes(16).toString('hex')
 
     const options = await generateRegistrationOptions({
       rpName:          RP_NAME,
-      rpID:            RP_ID,
+      rpID:            activeRpId,
       userID:          Buffer.from(userId),
       userName:        `user_${userId.slice(0, 8)}`,
       userDisplayName: 'SynthPay User',
@@ -137,21 +146,29 @@ export const authRoutes = async (server: FastifyInstance) => {
       return reply.status(400).send({ error: 'Challenge expired or not found' })
     }
 
+    const regAttempts = [
+      { origin: ACCT_ORIGIN, rpId: ACCT_RPID },
+      { origin: NEW_ORIGIN,  rpId: NEW_RPID  },
+      { origin: ORIGIN,      rpId: RP_ID     },
+    ]
+
     let verification: any
-    try {
-      verification = await verifyRegistrationResponse({
-        response:                credential,
-        expectedChallenge:       stored.challenge,
-        expectedOrigin:          ORIGIN,
-        expectedRPID:            RP_ID,
-        requireUserVerification: true,
-      })
-    } catch (err: any) {
-      return reply.status(400).send({ error: err.message })
+    let lastErr: any
+    for (const attempt of regAttempts) {
+      try {
+        verification = await verifyRegistrationResponse({
+          response:                credential,
+          expectedChallenge:       stored.challenge,
+          expectedOrigin:          attempt.origin,
+          expectedRPID:            attempt.rpId,
+          requireUserVerification: true,
+        })
+        if (verification.verified) break
+      } catch (err: any) { lastErr = err }
     }
 
-    if (!verification.verified || !verification.registrationInfo) {
-      return reply.status(400).send({ error: 'Verification failed' })
+    if (!verification?.verified || !verification.registrationInfo) {
+      return reply.status(400).send({ error: lastErr?.message || 'Verification failed' })
     }
 
     const { credential: cred } = verification.registrationInfo
@@ -184,8 +201,13 @@ export const authRoutes = async (server: FastifyInstance) => {
   server.post('/auth/login/begin', async (request, reply) => {
     await cleanChallenges()
 
+    const origin = (request.headers.origin as string) || ''
+    const activeRpId = origin === ACCT_ORIGIN ? ACCT_RPID
+                     : origin === NEW_ORIGIN  ? NEW_RPID
+                     : RP_ID
+
     const options = await generateAuthenticationOptions({
-      rpID:             RP_ID,
+      rpID:             activeRpId,
       userVerification: 'required',
     })
 
@@ -229,25 +251,32 @@ export const authRoutes = async (server: FastifyInstance) => {
       return reply.status(404).send({ error: 'Passkey not found' })
     }
 
+    const loginAttempts = [
+      { origin: ACCT_ORIGIN, rpId: ACCT_RPID },
+      { origin: NEW_ORIGIN,  rpId: NEW_RPID  },
+      { origin: ORIGIN,      rpId: RP_ID     },
+    ]
+
     let verification: any
-    try {
-      verification = await verifyAuthenticationResponse({
-        response:          credential,
-        expectedChallenge: stored.challenge,
-        expectedOrigin:    ORIGIN,
-        expectedRPID:      RP_ID,
-        credential: {
-          id:        passkey.credential_id,
-          publicKey: new Uint8Array(Buffer.from(passkey.public_key, 'base64')),
-          counter:   passkey.counter,
-        },
-        requireUserVerification: true,
-      })
-    } catch (err: any) {
-      return reply.status(400).send({ error: err.message })
+    for (const attempt of loginAttempts) {
+      try {
+        verification = await verifyAuthenticationResponse({
+          response:          credential,
+          expectedChallenge: stored.challenge,
+          expectedOrigin:    attempt.origin,
+          expectedRPID:      attempt.rpId,
+          credential: {
+            id:        passkey.credential_id,
+            publicKey: new Uint8Array(Buffer.from(passkey.public_key, 'base64')),
+            counter:   passkey.counter,
+          },
+          requireUserVerification: true,
+        })
+        if (verification.verified) break
+      } catch { /* try next */ }
     }
 
-    if (!verification.verified) {
+    if (!verification?.verified) {
       return reply.status(401).send({ error: 'Authentication failed' })
     }
 
