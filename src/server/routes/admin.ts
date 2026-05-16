@@ -295,8 +295,9 @@ export const adminRoutes = async (server: FastifyInstance) => {
     ])
 
     // ── Frontend probes (parallel) ────────────────────────────────────────────
-    const [walletProbe, dashProbe, landingProbe, tlLandingProbe] = await Promise.all([
+    const [walletProbe, walletLegacyProbe, dashProbe, landingProbe, tlLandingProbe] = await Promise.all([
       probe('https://account.synthpay.tech'),
+      probe('https://wallet.synthpay.tech'),
       probe('https://dashboard.synthpay.tech'),
       probe('https://www.synthpay.tech'),
       probe('https://trustledger.up.railway.app'),
@@ -307,6 +308,8 @@ export const adminRoutes = async (server: FastifyInstance) => {
 
     if (!walletProbe.ok)
       alerts.push({ level: 'critical', code: 'ACCOUNT_DOWN', message: `account.synthpay.tech is unreachable (HTTP ${walletProbe.status})` })
+    if (!walletLegacyProbe.ok)
+      alerts.push({ level: 'warning', code: 'WALLET_LEGACY_DOWN', message: `wallet.synthpay.tech (legacy) is unreachable (HTTP ${walletLegacyProbe.status}) — passkey migration flow will be broken` })
     if (!dashProbe.ok)
       alerts.push({ level: 'critical', code: 'DASHBOARD_DOWN', message: `dashboard.synthpay.tech is unreachable (HTTP ${dashProbe.status})` })
     if (!landingProbe.ok)
@@ -342,12 +345,13 @@ export const adminRoutes = async (server: FastifyInstance) => {
       alerts,
 
       services: {
-        api:        { name: 'TrustLedger API',       url: 'trustledger-production.up.railway.app', ok: true,               latency_ms: dbLatency, note: 'responding (this endpoint)' },
-        wallet:     { name: 'SynthPay Account',       url: 'account.synthpay.tech',                 ok: walletProbe.ok,     latency_ms: walletProbe.latency_ms,     status: walletProbe.status },
-        dashboard:  { name: 'Merchant Dashboard',     url: 'dashboard.synthpay.tech',               ok: dashProbe.ok,       latency_ms: dashProbe.latency_ms,       status: dashProbe.status },
-        landing:    { name: 'SynthPay Landing',       url: 'www.synthpay.tech',                     ok: landingProbe.ok,    latency_ms: landingProbe.latency_ms,    status: landingProbe.status },
-        tl_landing: { name: 'TrustLedger Landing',   url: 'trustledger.up.railway.app', ok: tlLandingProbe.ok, latency_ms: tlLandingProbe.latency_ms, status: tlLandingProbe.status },
-        database:   { name: 'PostgreSQL (Railway)',   url: 'postgres.railway.internal:5432',        ok: true,               latency_ms: dbLatency },
+        api:            { name: 'TrustLedger API',          url: 'trustledger-production.up.railway.app', ok: true,                     latency_ms: dbLatency,                  note: 'responding (this endpoint)' },
+        account:        { name: 'SynthPay Account',         url: 'account.synthpay.tech',                 ok: walletProbe.ok,           latency_ms: walletProbe.latency_ms,       status: walletProbe.status,       note: 'primary domain' },
+        wallet_legacy:  { name: 'SynthPay Account (Legacy)',url: 'wallet.synthpay.tech',                  ok: walletLegacyProbe.ok,     latency_ms: walletLegacyProbe.latency_ms, status: walletLegacyProbe.status, note: 'needed for passkey migration flow' },
+        dashboard:      { name: 'Merchant Dashboard',       url: 'dashboard.synthpay.tech',               ok: dashProbe.ok,             latency_ms: dashProbe.latency_ms,         status: dashProbe.status },
+        landing:        { name: 'SynthPay Landing',         url: 'www.synthpay.tech',                     ok: landingProbe.ok,          latency_ms: landingProbe.latency_ms,      status: landingProbe.status },
+        tl_landing:     { name: 'TrustLedger Landing',      url: 'trustledger.up.railway.app',            ok: tlLandingProbe.ok,        latency_ms: tlLandingProbe.latency_ms,    status: tlLandingProbe.status },
+        database:       { name: 'PostgreSQL (Railway)',      url: 'postgres.railway.internal:5432',        ok: true,                     latency_ms: dbLatency },
       },
 
       users: {
