@@ -40,6 +40,7 @@ const start = async () => {
         'https://dashboard.synthpay.tech',
         'https://www.synthpay.tech',
         'https://synthpay.tech',
+        'https://trustledger.up.railway.app',
         'http://localhost:5174',
         'http://localhost:5175',
         'http://localhost:5176',

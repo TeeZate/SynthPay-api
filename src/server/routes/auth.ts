@@ -43,14 +43,18 @@ const sendOTPEmail = async (email: string, otp: string, userId: string) => {
 export const authRoutes = async (server: FastifyInstance) => {
 
   // ── 2.02 REGISTRATION BEGIN ───────────────────────────────────────────────
+  // Detects origin header to serve the correct rpId for the calling domain
   server.post('/auth/register/begin', async (request, reply) => {
     await cleanChallenges()
+
+    const origin = (request.headers.origin as string) || ''
+    const activeRpId = origin === NEW_ORIGIN ? NEW_RPID : RP_ID
 
     const userId = randomBytes(16).toString('hex')
 
     const options = await generateRegistrationOptions({
       rpName:          RP_NAME,
-      rpID:            RP_ID,
+      rpID:            activeRpId,
       userID:          Buffer.from(userId),
       userName:        `user_${userId.slice(0, 8)}`,
       userDisplayName: 'SynthPay User',
@@ -95,21 +99,31 @@ export const authRoutes = async (server: FastifyInstance) => {
       return reply.status(400).send({ error: 'Challenge expired or not found' })
     }
 
+    // Try both domains so credentials from either wallet domain verify correctly
+    const regAttempts = [
+      { origin: NEW_ORIGIN, rpId: NEW_RPID },
+      { origin: ORIGIN,     rpId: RP_ID    },
+    ]
+
     let verification: any
-    try {
-      verification = await verifyRegistrationResponse({
-        response:                credential,
-        expectedChallenge:       stored.challenge,
-        expectedOrigin:          ORIGIN,
-        expectedRPID:            RP_ID,
-        requireUserVerification: true,
-      })
-    } catch (err: any) {
-      return reply.status(400).send({ error: err.message })
+    let lastErr: any
+    for (const attempt of regAttempts) {
+      try {
+        verification = await verifyRegistrationResponse({
+          response:                credential,
+          expectedChallenge:       stored.challenge,
+          expectedOrigin:          attempt.origin,
+          expectedRPID:            attempt.rpId,
+          requireUserVerification: true,
+        })
+        if (verification.verified) break
+      } catch (err: any) {
+        lastErr = err
+      }
     }
 
-    if (!verification.verified || !verification.registrationInfo) {
-      return reply.status(400).send({ error: 'Verification failed' })
+    if (!verification?.verified || !verification.registrationInfo) {
+      return reply.status(400).send({ error: lastErr?.message || 'Verification failed' })
     }
 
     const { credential: cred } = verification.registrationInfo
