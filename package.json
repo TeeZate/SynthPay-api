@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "build": "echo build skipped",
-    "start": "ts-node src/server/index.ts",
+    "start": "ts-node --transpile-only src/server/index.ts",
     "dev": "nodemon --exec ts-node src/server/index.ts",
     "db:setup": "cross-env DATABASE_URL=postgresql://postgres:eajKeAQopjDrchwqYfNYZkcuolwryQTi@roundhouse.proxy.rlwy.net:26971/railway npx ts-node src/db/setup.ts",
     "test": "vitest run",
