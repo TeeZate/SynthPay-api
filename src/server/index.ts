@@ -37,6 +37,7 @@ const start = async () => {
         'https://synthpay-wallet.vercel.app',
         'https://synthpay-landing.vercel.app',
         'https://wallet.synthpay.tech',
+        'https://account.synthpay.tech',
         'https://dashboard.synthpay.tech',
         'https://www.synthpay.tech',
         'https://synthpay.tech',

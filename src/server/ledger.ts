@@ -71,7 +71,7 @@ export const atomicDeduct = async (
     if (err.message === 'INSUFFICIENT_FUNDS') {
       return { 
         success: false, 
-        error: 'Insufficient balance. Please top up your wallet.' 
+        error: 'Insufficient balance. Please top up your account.'
       }
     }
     // Log unexpected errors but never expose internals

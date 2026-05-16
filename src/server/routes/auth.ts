@@ -9,12 +9,16 @@ import { db } from '../../db/index'
 import jwt from 'jsonwebtoken'
 import { randomBytes, randomInt } from 'crypto'
 
-const RP_NAME    = 'SynthPay'
-const RP_ID      = process.env.WEBAUTHN_RPID     || 'localhost'
-const ORIGIN     = process.env.WEBAUTHN_ORIGIN   || 'http://localhost:3000'
-const NEW_RPID   = process.env.WEBAUTHN_NEW_RPID || 'wallet.synthpay.tech'
-const NEW_ORIGIN = process.env.WEBAUTHN_NEW_ORIGIN || 'https://wallet.synthpay.tech'
-const JWT_SECRET = process.env.JWT_SECRET        || 'changeme'
+const RP_NAME      = 'SynthPay'
+const RP_ID        = process.env.WEBAUTHN_RPID        || 'localhost'
+const ORIGIN       = process.env.WEBAUTHN_ORIGIN      || 'http://localhost:3000'
+// Legacy domain (wallet.synthpay.tech) — kept for existing passkey verification
+const NEW_RPID     = process.env.WEBAUTHN_NEW_RPID    || 'wallet.synthpay.tech'
+const NEW_ORIGIN   = process.env.WEBAUTHN_NEW_ORIGIN  || 'https://wallet.synthpay.tech'
+// Current domain (account.synthpay.tech) — used for new registrations
+const ACCT_RPID    = process.env.WEBAUTHN_ACCT_RPID   || 'account.synthpay.tech'
+const ACCT_ORIGIN  = process.env.WEBAUTHN_ACCT_ORIGIN || 'https://account.synthpay.tech'
+const JWT_SECRET   = process.env.JWT_SECRET            || 'changeme'
 const OTP_EXPIRY = 10 * 60 * 1000              // 10 minutes
 
 // ── Helper: clean expired challenges ─────────────────────────────────────────
@@ -48,7 +52,10 @@ export const authRoutes = async (server: FastifyInstance) => {
     await cleanChallenges()
 
     const origin = (request.headers.origin as string) || ''
-    const activeRpId = origin === NEW_ORIGIN ? NEW_RPID : RP_ID
+    // Pick rpId based on calling domain; account.synthpay.tech is the current domain
+    const activeRpId = origin === ACCT_ORIGIN ? ACCT_RPID
+                     : origin === NEW_ORIGIN  ? NEW_RPID
+                     : RP_ID
 
     const userId = randomBytes(16).toString('hex')
 
@@ -99,10 +106,11 @@ export const authRoutes = async (server: FastifyInstance) => {
       return reply.status(400).send({ error: 'Challenge expired or not found' })
     }
 
-    // Try both domains so credentials from either wallet domain verify correctly
+    // Try all domains in priority order (newest first) so passkeys from any domain verify correctly
     const regAttempts = [
-      { origin: NEW_ORIGIN, rpId: NEW_RPID },
-      { origin: ORIGIN,     rpId: RP_ID    },
+      { origin: ACCT_ORIGIN, rpId: ACCT_RPID },
+      { origin: NEW_ORIGIN,  rpId: NEW_RPID  },
+      { origin: ORIGIN,      rpId: RP_ID     },
     ]
 
     let verification: any
@@ -145,7 +153,7 @@ export const authRoutes = async (server: FastifyInstance) => {
     const token = jwt.sign({ user_id: user.id }, JWT_SECRET, { expiresIn: '24h' })
 
     return reply.status(201).send({
-      message: 'Wallet created successfully',
+      message: 'Account created successfully',
       user_id: user.id,
       balance: Number(user.balance),
       token,
@@ -158,7 +166,9 @@ export const authRoutes = async (server: FastifyInstance) => {
     await cleanChallenges()
 
     const origin = (request.headers.origin as string) || ''
-    const activeRpId = origin === NEW_ORIGIN ? NEW_RPID : RP_ID
+    const activeRpId = origin === ACCT_ORIGIN ? ACCT_RPID
+                     : origin === NEW_ORIGIN  ? NEW_RPID
+                     : RP_ID
 
     const options = await generateAuthenticationOptions({
       rpID:             activeRpId,
@@ -206,10 +216,11 @@ export const authRoutes = async (server: FastifyInstance) => {
       return reply.status(404).send({ error: 'Passkey not found' })
     }
 
-    // Try verifying against old domain first, then new domain
+    // Try all domains; newest first so account.synthpay.tech passkeys resolve fastest
     const attempts = [
-      { origin: ORIGIN,     rpId: RP_ID     },
-      { origin: NEW_ORIGIN, rpId: NEW_RPID  },
+      { origin: ACCT_ORIGIN, rpId: ACCT_RPID },
+      { origin: NEW_ORIGIN,  rpId: NEW_RPID  },
+      { origin: ORIGIN,      rpId: RP_ID     },
     ]
 
     let verification: any
@@ -256,14 +267,14 @@ export const authRoutes = async (server: FastifyInstance) => {
   })
 
   // ── PASSKEY MIGRATION ─────────────────────────────────────────────────────
-  // Allows existing users to add a new passkey bound to wallet.synthpay.tech
+  // Allows existing users to add a new passkey bound to account.synthpay.tech
   // without losing their account or balance.
   //
   // Flow:
   //   1. User logs in at synthpay-wallet.vercel.app (old domain)
   //   2. Calls /auth/migration-token → gets a 10-min scoped token
-  //   3. Redirected to wallet.synthpay.tech/migrate?token=<token>
-  //   4. /auth/migrate/begin  → registration options for wallet.synthpay.tech
+  //   3. Redirected to account.synthpay.tech/migrate?token=<token>
+  //   4. /auth/migrate/begin  → registration options for account.synthpay.tech
   //   5. /auth/migrate/complete → new passkey added to existing account
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -309,7 +320,7 @@ export const authRoutes = async (server: FastifyInstance) => {
 
     const options = await generateRegistrationOptions({
       rpName:          RP_NAME,
-      rpID:            NEW_RPID,
+      rpID:            ACCT_RPID,
       userID:          Buffer.from(payload.user_id),
       userName:        `user_${payload.user_id.slice(0, 8)}`,
       userDisplayName: user.display_name || 'SynthPay User',
@@ -363,8 +374,8 @@ export const authRoutes = async (server: FastifyInstance) => {
       verification = await verifyRegistrationResponse({
         response:                credential,
         expectedChallenge:       stored.challenge,
-        expectedOrigin:          NEW_ORIGIN,
-        expectedRPID:            NEW_RPID,
+        expectedOrigin:          ACCT_ORIGIN,
+        expectedRPID:            ACCT_RPID,
         requireUserVerification: true,
       })
     } catch (err: any) {
@@ -392,7 +403,7 @@ export const authRoutes = async (server: FastifyInstance) => {
     const newToken = jwt.sign({ user_id: payload.user_id }, JWT_SECRET, { expiresIn: '24h' })
 
     return reply.send({
-      message: 'Passkey added for wallet.synthpay.tech — you can now sign in on this domain.',
+      message: 'Passkey added for account.synthpay.tech — you can now sign in on this domain.',
       user_id: payload.user_id,
       balance: Number(user.balance),
       token:   newToken,
@@ -416,14 +427,14 @@ export const authRoutes = async (server: FastifyInstance) => {
       .first()
 
     if (existing) {
-      return reply.status(409).send({ error: 'Email already linked to another wallet' })
+      return reply.status(409).send({ error: 'Email already linked to another account' })
     }
 
     await db('users').where({ id: user_id }).update({ email: emailLower })
 
     return reply.send({
       success: true,
-      message: 'Email linked to wallet. You can now use it for cross-device login.'
+      message: 'Email linked to account. You can now use it for cross-device login.'
     })
   })
 
@@ -451,7 +462,7 @@ export const authRoutes = async (server: FastifyInstance) => {
     if (!user) {
       return reply.send({
         success: true,
-        message: 'If that email is linked to a wallet, a code has been sent.'
+        message: 'If that email is linked to an account, a code has been sent.'
       })
     }
 

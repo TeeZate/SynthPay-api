@@ -296,7 +296,7 @@ export const adminRoutes = async (server: FastifyInstance) => {
 
     // ── Frontend probes (parallel) ────────────────────────────────────────────
     const [walletProbe, dashProbe, landingProbe, tlLandingProbe] = await Promise.all([
-      probe('https://wallet.synthpay.tech'),
+      probe('https://account.synthpay.tech'),
       probe('https://dashboard.synthpay.tech'),
       probe('https://www.synthpay.tech'),
       probe('https://trustledger.up.railway.app'),
@@ -306,7 +306,7 @@ export const adminRoutes = async (server: FastifyInstance) => {
     const alerts: { level: 'critical' | 'warning' | 'info'; code: string; message: string }[] = []
 
     if (!walletProbe.ok)
-      alerts.push({ level: 'critical', code: 'WALLET_DOWN', message: `wallet.synthpay.tech is unreachable (HTTP ${walletProbe.status})` })
+      alerts.push({ level: 'critical', code: 'ACCOUNT_DOWN', message: `account.synthpay.tech is unreachable (HTTP ${walletProbe.status})` })
     if (!dashProbe.ok)
       alerts.push({ level: 'critical', code: 'DASHBOARD_DOWN', message: `dashboard.synthpay.tech is unreachable (HTTP ${dashProbe.status})` })
     if (!landingProbe.ok)
@@ -343,7 +343,7 @@ export const adminRoutes = async (server: FastifyInstance) => {
 
       services: {
         api:        { name: 'TrustLedger API',       url: 'trustledger-production.up.railway.app', ok: true,               latency_ms: dbLatency, note: 'responding (this endpoint)' },
-        wallet:     { name: 'SynthPay Wallet',        url: 'wallet.synthpay.tech',                  ok: walletProbe.ok,     latency_ms: walletProbe.latency_ms,     status: walletProbe.status },
+        wallet:     { name: 'SynthPay Account',       url: 'account.synthpay.tech',                 ok: walletProbe.ok,     latency_ms: walletProbe.latency_ms,     status: walletProbe.status },
         dashboard:  { name: 'Merchant Dashboard',     url: 'dashboard.synthpay.tech',               ok: dashProbe.ok,       latency_ms: dashProbe.latency_ms,       status: dashProbe.status },
         landing:    { name: 'SynthPay Landing',       url: 'www.synthpay.tech',                     ok: landingProbe.ok,    latency_ms: landingProbe.latency_ms,    status: landingProbe.status },
         tl_landing: { name: 'TrustLedger Landing',   url: 'trustledger.up.railway.app', ok: tlLandingProbe.ok, latency_ms: tlLandingProbe.latency_ms, status: tlLandingProbe.status },
@@ -378,7 +378,7 @@ export const adminRoutes = async (server: FastifyInstance) => {
         },
         stuck_challenges:    stuckChallenges.length,
         webauthn_rpid_old:   process.env.WEBAUTHN_RPID || 'synthpay-wallet.vercel.app',
-        webauthn_rpid_new:   process.env.WEBAUTHN_NEW_RPID || 'wallet.synthpay.tech',
+        webauthn_rpid_new:   process.env.WEBAUTHN_ACCT_RPID || 'account.synthpay.tech',
       },
 
       payments: {
