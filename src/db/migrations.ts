@@ -114,9 +114,23 @@ export const runMigrations = async () => {
       t.decimal('amount', 18, 8).notNullable()
       t.string('stripe_payment_id').notNullable().unique()
       t.string('status').notNullable().defaultTo('pending')
+      t.string('provider').notNullable().defaultTo('stripe')
+      t.string('currency').notNullable().defaultTo('USD')
+      t.string('payment_ref').nullable().unique()
       t.timestamp('created_at').notNullable().defaultTo(db.fn.now())
     })
     console.log('✅ topups table created')
+  } else {
+    // Idempotent: add provider/currency/payment_ref if missing (existing deployments)
+    const hasProvider = await db.schema.hasColumn('topups', 'provider')
+    if (!hasProvider) {
+      await db.schema.alterTable('topups', (t) => {
+        t.string('provider').notNullable().defaultTo('stripe')
+        t.string('currency').notNullable().defaultTo('USD')
+        t.string('payment_ref').nullable()
+      })
+      console.log('✅ topups: added provider/currency/payment_ref columns')
+    }
   }
 
   // 7. CHALLENGES — one-time WebAuthn challenges (expire in 5 minutes)
