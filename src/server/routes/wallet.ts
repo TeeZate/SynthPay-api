@@ -12,6 +12,41 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
 
 export const walletRoutes = async (server: FastifyInstance) => {
 
+  // ── CREATE PAYMENT INTENT — returns client_secret for Stripe Elements ────
+  server.post('/wallet/topup/intent', async (request, reply) => {
+    const { user_id, amount } = request.body as { user_id: string; amount: number }
+
+    if (!user_id || !amount) {
+      return reply.status(400).send({ error: 'user_id and amount required' })
+    }
+    if (amount < 1)    return reply.status(400).send({ error: 'Minimum top-up is $1' })
+    if (amount > 1000) return reply.status(400).send({ error: 'Maximum top-up is $1,000' })
+
+    const user = await db('users').where({ id: user_id }).first()
+    if (!user) return reply.status(404).send({ error: 'User not found' })
+
+    // Create Stripe PaymentIntent
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount:   Math.round(amount * 100), // cents
+      currency: 'usd',
+      metadata: { user_id, type: 'wallet_topup' },
+      automatic_payment_methods: { enabled: true },
+    })
+
+    // Pre-create topup record as pending so the webhook can find it
+    await db('topups').insert({
+      user_id,
+      amount:            Number(amount),
+      stripe_payment_id: paymentIntent.id,
+      status:            'pending',
+    })
+
+    return reply.send({
+      client_secret:   paymentIntent.client_secret,
+      publishable_key: process.env.STRIPE_PUBLISHABLE_KEY,
+    })
+  })
+
   // ── CREATE TOP-UP — with idempotency key ─────────────────────────────────
   server.post('/wallet/topup/create', async (request, reply) => {
     const { user_id, amount, idempotency_key } = request.body as {
@@ -141,7 +176,18 @@ export const walletRoutes = async (server: FastifyInstance) => {
         .first()
 
       if (!topup) {
-        console.error('Topup record not found for:', paymentIntent.id)
+        // Fallback: insert the record and credit — should not happen normally
+        const amount = paymentIntent.amount / 100
+        await db.transaction(async (trx) => {
+          await trx('users').where({ id: user_id }).increment('balance', amount)
+          await trx('topups').insert({
+            user_id,
+            amount,
+            stripe_payment_id: paymentIntent.id,
+            status: 'completed',
+          })
+        })
+        console.log(`Wallet credited (fallback): user ${user_id} +$${amount}`)
         return reply.send({ received: true })
       }
 
