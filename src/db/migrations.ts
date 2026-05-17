@@ -133,7 +133,36 @@ export const runMigrations = async () => {
     }
   }
 
-  // 7. CHALLENGES — one-time WebAuthn challenges (expire in 5 minutes)
+  // 7. PAYOUTS — merchant withdrawal records
+  const hasPayouts = await db.schema.hasTable('payouts')
+  if (!hasPayouts) {
+    await db.schema.createTable('payouts', (t) => {
+      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'))
+      t.uuid('merchant_id').notNullable().references('id').inTable('merchants')
+      t.decimal('amount', 18, 8).notNullable()
+      t.string('method').notNullable().defaultTo('bank_transfer') // bank_transfer | mobile_money | stripe_connect
+      t.string('status').notNullable().defaultTo('pending')       // pending | completed | failed
+      t.string('stripe_transfer_id').nullable().unique()
+      t.jsonb('payout_details').nullable()   // bank details / phone / etc — varies by method
+      t.text('notes').nullable()
+      t.timestamp('created_at').notNullable().defaultTo(db.fn.now())
+      t.timestamp('updated_at').notNullable().defaultTo(db.fn.now())
+    })
+    console.log('✅ payouts table created')
+  }
+
+  // 7b. MERCHANTS — add missing columns (existing deployments)
+  const hasMerchantEmail = await db.schema.hasColumn('merchants', 'email')
+  if (!hasMerchantEmail) {
+    await db.schema.alterTable('merchants', (t) => {
+      t.string('email').nullable()
+      t.string('stripe_account_id').nullable()
+      t.string('payout_method').notNullable().defaultTo('bank_transfer')
+    })
+    console.log('✅ merchants: added email, stripe_account_id, payout_method columns')
+  }
+
+  // 8. CHALLENGES — one-time WebAuthn challenges (expire in 5 minutes)
   const hasChallenges = await db.schema.hasTable('challenges')
   if (!hasChallenges) {
     await db.schema.createTable('challenges', (t) => {
