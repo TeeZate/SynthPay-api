@@ -222,6 +222,165 @@ export const walletRoutes = async (server: FastifyInstance) => {
     return reply.send({ received: true })
   })
 
+  // ── ZIINA (UAE) — stub until API keys are live ────────────────────────────
+  server.post('/wallet/topup/ziina', async (request, reply) => {
+    const { user_id, amount_usd } = request.body as { user_id: string; amount_usd: number }
+
+    if (!user_id || !amount_usd) {
+      return reply.status(400).send({ error: 'user_id and amount_usd required' })
+    }
+    if (amount_usd < 1)    return reply.status(400).send({ error: 'Minimum top-up is $1' })
+    if (amount_usd > 1000) return reply.status(400).send({ error: 'Maximum top-up is $1,000' })
+
+    const user = await db('users').where({ id: user_id }).first()
+    if (!user) return reply.status(404).send({ error: 'User not found' })
+
+    const AED_RATE = Number(process.env.ZIINA_USD_TO_AED || 3.67)
+    const amount_aed = Number((amount_usd * AED_RATE).toFixed(2))
+    const ref = `ziina_stub_${Date.now()}_${user_id.slice(0, 8)}`
+
+    // Pre-create pending topup record
+    await db('topups').insert({
+      user_id,
+      amount:            amount_usd,
+      stripe_payment_id: ref,           // reuse column (unique ref)
+      status:            'pending',
+      provider:          'ziina',
+      currency:          'AED',
+      payment_ref:       ref,
+    })
+
+    // ── STUB: replace with real Ziina API call when key is available ──────
+    // const ziina = await fetch('https://api.ziina.com/v1/payment-requests', {
+    //   method: 'POST',
+    //   headers: { Authorization: `Bearer ${process.env.ZIINA_API_KEY}`, 'Content-Type': 'application/json' },
+    //   body: JSON.stringify({ amount: amount_aed, currency: 'AED', reference: ref,
+    //                          redirect_url: `${process.env.APP_URL}/topup/success?ref=${ref}` })
+    // }).then(r => r.json())
+    // return reply.send({ payment_url: ziina.payment_url, ref, amount_aed })
+
+    return reply.send({
+      payment_url: `https://pay.ziina.com/stub/${ref}`,   // placeholder
+      ref,
+      amount_aed,
+      amount_usd,
+      stub: true,
+    })
+  })
+
+  // Ziina webhook (fires when user pays in Ziina app)
+  server.post('/wallet/topup/ziina/webhook', async (request, reply) => {
+    // ── STUB: real implementation validates Ziina webhook signature ────────
+    // const sig = request.headers['x-ziina-signature']
+    // verify sig with ZIINA_WEBHOOK_SECRET ...
+
+    const { reference, status } = request.body as { reference: string; status: string }
+
+    if (status !== 'PAID') return reply.send({ received: true })
+
+    const topup = await db('topups').where({ payment_ref: reference, provider: 'ziina' }).first()
+    if (!topup || topup.status === 'completed') return reply.send({ received: true })
+
+    await db.transaction(async (trx) => {
+      await trx('users').where({ id: topup.user_id }).increment('balance', topup.amount)
+      await trx('topups').where({ id: topup.id }).update({ status: 'completed' })
+    })
+
+    console.log(`[Ziina] Wallet credited: user ${topup.user_id} +$${topup.amount}`)
+    return reply.send({ received: true })
+  })
+
+  // ── NARDO PAY (Africa) — stub until API keys are live ────────────────────
+  server.post('/wallet/topup/nardo', async (request, reply) => {
+    const { user_id, amount_usd, phone, currency } = request.body as {
+      user_id:    string
+      amount_usd: number
+      phone:      string
+      currency:   string
+    }
+
+    if (!user_id || !amount_usd || !phone || !currency) {
+      return reply.status(400).send({ error: 'user_id, amount_usd, phone and currency required' })
+    }
+    if (amount_usd < 1)    return reply.status(400).send({ error: 'Minimum top-up is $1' })
+    if (amount_usd > 1000) return reply.status(400).send({ error: 'Maximum top-up is $1,000' })
+
+    const user = await db('users').where({ id: user_id }).first()
+    if (!user) return reply.status(404).send({ error: 'User not found' })
+
+    const ref = `nardo_stub_${Date.now()}_${user_id.slice(0, 8)}`
+
+    // FX rates — replace with live Nardo Pay API rates when available
+    const FX: Record<string, number> = {
+      KES: 129.5, NGN: 1580, GHS: 15.2, ZAR: 18.4,
+      UGX: 3720, TZS: 2590, ZMW: 25.8, XOF: 605,
+    }
+    const rate       = FX[currency] || 1
+    const local_amount = Number((amount_usd * rate).toFixed(2))
+
+    await db('topups').insert({
+      user_id,
+      amount:            amount_usd,
+      stripe_payment_id: ref,
+      status:            'pending',
+      provider:          'nardo',
+      currency,
+      payment_ref:       ref,
+    })
+
+    // ── STUB: replace with real Nardo Pay API call when key is available ──
+    // const nardo = await fetch('https://api.nardopay.com/v1/charges', {
+    //   method: 'POST',
+    //   headers: { Authorization: `Bearer ${process.env.NARDO_API_KEY}` },
+    //   body: JSON.stringify({ phone, currency, amount: local_amount, reference: ref })
+    // }).then(r => r.json())
+
+    return reply.send({
+      ref,
+      amount_usd,
+      local_amount,
+      currency,
+      phone,
+      instructions: `A payment prompt of ${currency} ${local_amount.toLocaleString()} has been sent to ${phone}. Approve it on your phone to credit your account.`,
+      stub: true,
+    })
+  })
+
+  // Nardo Pay webhook
+  server.post('/wallet/topup/nardo/webhook', async (request, reply) => {
+    // ── STUB: real implementation validates Nardo webhook signature ─────────
+    const { reference, status } = request.body as { reference: string; status: string }
+
+    if (status !== 'SUCCESS') return reply.send({ received: true })
+
+    const topup = await db('topups').where({ payment_ref: reference, provider: 'nardo' }).first()
+    if (!topup || topup.status === 'completed') return reply.send({ received: true })
+
+    await db.transaction(async (trx) => {
+      await trx('users').where({ id: topup.user_id }).increment('balance', topup.amount)
+      await trx('topups').where({ id: topup.id }).update({ status: 'completed' })
+    })
+
+    console.log(`[Nardo] Wallet credited: user ${topup.user_id} +$${topup.amount}`)
+    return reply.send({ received: true })
+  })
+
+  // ── GET TOPUP STATUS (for polling — Ziina / Nardo) ────────────────────────
+  server.get('/wallet/topup/status/:ref', async (request, reply) => {
+    const { ref } = request.params as { ref: string }
+
+    const topup = await db('topups').where({ payment_ref: ref }).first()
+    if (!topup) return reply.status(404).send({ error: 'Topup not found' })
+
+    return reply.send({
+      ref,
+      status:   topup.status,
+      provider: topup.provider,
+      amount:   Number(topup.amount),
+      currency: topup.currency,
+    })
+  })
+
   // ── GET TOPUP HISTORY ─────────────────────────────────────────────────────
   server.get('/wallet/topups/:user_id', async (request, reply) => {
     const { user_id } = request.params as { user_id: string }
