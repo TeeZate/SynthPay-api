@@ -1,5 +1,5 @@
 import { db } from '../db/index'
-import { createHash } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 
 interface DeductParams {
   user_id:     string
@@ -47,8 +47,14 @@ export const atomicDeduct = async (
         .increment('balance', merchant_receives)
         .increment('total_earned', merchant_receives)
 
-      // STEP 3 — Write to immutable ledger
-      // Lock the last entry to get its hash and prevent concurrent hash writes
+      // STEP 3 — Write to immutable ledger with hash chain
+      // Generate id + timestamp in app so we can compute the hash BEFORE inserting.
+      // This means only 1 extra query (the prev_hash SELECT) instead of 3,
+      // keeping settlement latency as close to original as possible.
+      const newId     = randomUUID()
+      const createdAt = new Date()
+
+      // Lock the tail of the chain to get prev_hash and prevent concurrent hash writes
       const lastEntry = await trx('ledger')
         .orderBy('created_at', 'desc')
         .select('entry_hash')
@@ -57,8 +63,13 @@ export const atomicDeduct = async (
 
       const prevHash = lastEntry?.entry_hash || '0000000000000000'
 
-      // Insert and return the full row so we have id + created_at for hashing
-      const [newEntry] = await trx('ledger').insert({
+      // Compute hash before insert — SHA256(id|user_id|merchant_id|amount|fee|timestamp|prev_hash)
+      const entryData = `${newId}|${user_id}|${merchant_id}|${Number(amount)}|${Number(platform_fee)}|${createdAt}|${prevHash}`
+      const entryHash = createHash('sha256').update(entryData).digest('hex')
+
+      // Single INSERT — hash is already computed, no RETURNING or UPDATE needed
+      await trx('ledger').insert({
+        id:                 newId,
         user_id,
         merchant_id,
         endpoint_id,
@@ -66,17 +77,11 @@ export const atomicDeduct = async (
         platform_fee,
         merchant_receives,
         user_balance_after: balance_after,
-        status: 'completed'
-      }).returning('*')
-
-      // Compute this entry's hash: SHA256(id|user_id|merchant_id|amount|fee|timestamp|prev_hash)
-      const entryData = `${newEntry.id}|${newEntry.user_id}|${newEntry.merchant_id}|${Number(newEntry.amount)}|${Number(newEntry.platform_fee)}|${newEntry.created_at}|${prevHash}`
-      const entryHash = createHash('sha256').update(entryData).digest('hex')
-
-      // Store the hash back — same transaction, so it's atomic
-      await trx('ledger')
-        .where({ id: newEntry.id })
-        .update({ entry_hash: entryHash, prev_hash: prevHash })
+        created_at:         createdAt,
+        status:             'completed',
+        entry_hash:         entryHash,
+        prev_hash:          prevHash
+      })
 
       return balance_after
     })
