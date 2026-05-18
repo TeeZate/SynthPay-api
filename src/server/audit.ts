@@ -79,57 +79,60 @@ export const runAudit = async (): Promise<AuditResult> => {
   return { status, total_entries: entries.length, total_volume, total_fees, chain_hash, anomalies: anomalies.length, anomaly_details: anomalies, run_at }
 }
 
-// ── Live ledger stats — computed fresh on every call ─────────────────────────
+// ── Live ledger stats — reads stored hashes, no per-entry recomputation ───────
 export const getLiveStats = async () => {
   const verified_at = new Date()
 
-  // All ledger entries
-  const entries = await db('ledger').orderBy('created_at', 'asc').select('*')
+  // All aggregates in parallel — no entry-by-entry loop needed
+  const [totals, feeAnomalies, negativeBalances, merchantCount, userCount, lastEntry, merchantStats] = await Promise.all([
 
-  let total_volume = 0
-  let total_fees   = 0
-  let anomalies    = 0
-  let runningHash  = ''
-  let previousHash = '0000000000000000'
+    // Volume + fee totals + entry count in one query
+    db('ledger')
+      .select(
+        db.raw('COUNT(id) as total_entries'),
+        db.raw('SUM(amount) as total_volume'),
+        db.raw('SUM(platform_fee) as total_fees')
+      )
+      .first(),
 
-  for (const entry of entries) {
-    const amount        = Number(entry.amount)
-    const fee           = Number(entry.platform_fee)
-    const merchant_recv = Number(entry.merchant_receives)
+    // Anomaly: fee arithmetic mismatch (amount - platform_fee != merchant_receives)
+    db('ledger')
+      .whereRaw('ABS((amount - platform_fee) - merchant_receives) > 0.000001')
+      .count('id as count')
+      .first(),
 
-    const expectedMerchant = amount - fee
-    if (Math.abs(expectedMerchant - merchant_recv) > 0.000001) anomalies++
-    if (Number(entry.user_balance_after) < 0) anomalies++
+    // Anomaly: negative balance after transaction
+    db('ledger')
+      .where('user_balance_after', '<', 0)
+      .count('id as count')
+      .first(),
 
-    total_volume += amount
-    total_fees   += fee
-
-    const entryData = `${entry.id}|${entry.user_id}|${entry.merchant_id}|${amount}|${fee}|${entry.created_at}|${previousHash}`
-    runningHash  = createHash('sha256').update(entryData).digest('hex')
-    previousHash = runningHash
-  }
-
-  const chain_hash = runningHash || createHash('sha256').update('empty_ledger').digest('hex')
-  const chain_valid = anomalies === 0
-
-  // Aggregate counts
-  const [merchantCount, userCount, lastEntry] = await Promise.all([
+    // Network counts
     db('merchants').where({ active: true }).count('id as count').first(),
     db('users').count('id as count').first(),
-    db('ledger').orderBy('created_at', 'desc').first()
+
+    // Chain hash — read the tail entry's stored hash (computed at write time)
+    db('ledger').orderBy('created_at', 'desc').select('entry_hash', 'created_at').first(),
+
+    // Per-merchant breakdown
+    db('ledger as l')
+      .join('merchants as m', 'l.merchant_id', 'm.id')
+      .groupBy('m.id', 'm.name')
+      .select(
+        'm.name as merchant_name',
+        db.raw('COUNT(l.id) as call_count'),
+        db.raw('SUM(l.amount) as volume'),
+        db.raw('SUM(l.merchant_receives) as earned')
+      )
+      .orderBy('call_count', 'desc')
   ])
 
-  // Per-merchant breakdown
-  const merchantStats = await db('ledger as l')
-    .join('merchants as m', 'l.merchant_id', 'm.id')
-    .groupBy('m.id', 'm.name')
-    .select(
-      'm.name as merchant_name',
-      db.raw('COUNT(l.id) as call_count'),
-      db.raw('SUM(l.amount) as volume'),
-      db.raw('SUM(l.merchant_receives) as earned')
-    )
-    .orderBy('call_count', 'desc')
+  const total_volume  = Number(totals?.total_volume  || 0)
+  const total_fees    = Number(totals?.total_fees    || 0)
+  const total_entries = Number(totals?.total_entries || 0)
+  const anomalies     = Number(feeAnomalies?.count || 0) + Number(negativeBalances?.count || 0)
+  const chain_hash    = lastEntry?.entry_hash || createHash('sha256').update('empty_ledger').digest('hex')
+  const chain_valid   = anomalies === 0
 
   return {
     // Integrity
@@ -139,7 +142,7 @@ export const getLiveStats = async () => {
     status: chain_valid ? 'PASSED' : 'FAILED',
 
     // Volume
-    total_api_calls:  entries.length,
+    total_api_calls:  total_entries,
     total_volume_usd: `$${total_volume.toFixed(6)}`,
     total_fees_usd:   `$${total_fees.toFixed(6)}`,
     total_volume_raw: total_volume,
@@ -153,10 +156,10 @@ export const getLiveStats = async () => {
 
     // Per merchant
     merchant_breakdown: merchantStats.map((m: any) => ({
-      merchant:   m.merchant_name,
-      api_calls:  Number(m.call_count),
-      volume:     `$${Number(m.volume).toFixed(6)}`,
-      earned:     `$${Number(m.earned).toFixed(6)}`
+      merchant:  m.merchant_name,
+      api_calls: Number(m.call_count),
+      volume:    `$${Number(m.volume).toFixed(6)}`,
+      earned:    `$${Number(m.earned).toFixed(6)}`
     })),
 
     verified_at
