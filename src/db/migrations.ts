@@ -1,5 +1,6 @@
 import knex from 'knex'
 import dotenv from 'dotenv'
+import { createHash } from 'crypto'
 
 dotenv.config()
 
@@ -149,6 +150,29 @@ export const runMigrations = async () => {
       t.timestamp('updated_at').notNullable().defaultTo(db.fn.now())
     })
     console.log('✅ payouts table created')
+  }
+
+  // 6b. LEDGER — add entry_hash / prev_hash columns (existing deployments)
+  const hasEntryHash = await db.schema.hasColumn('ledger', 'entry_hash')
+  if (!hasEntryHash) {
+    await db.schema.alterTable('ledger', (t) => {
+      t.text('entry_hash').nullable()
+      t.text('prev_hash').nullable()
+    })
+    console.log('✅ ledger: added entry_hash, prev_hash columns')
+
+    // Backfill all existing entries in chronological order
+    const entries = await db('ledger').orderBy('created_at', 'asc').select('*')
+    let previousHash = '0000000000000000'
+    for (const entry of entries) {
+      const amount = Number(entry.amount)
+      const fee    = Number(entry.platform_fee)
+      const data   = `${entry.id}|${entry.user_id}|${entry.merchant_id}|${amount}|${fee}|${entry.created_at}|${previousHash}`
+      const hash   = createHash('sha256').update(data).digest('hex')
+      await db('ledger').where({ id: entry.id }).update({ entry_hash: hash, prev_hash: previousHash })
+      previousHash = hash
+    }
+    console.log(`✅ ledger: backfilled entry_hash for ${entries.length} existing entries`)
   }
 
   // 7b. MERCHANTS — add missing columns (existing deployments)

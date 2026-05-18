@@ -1,5 +1,4 @@
 import { FastifyInstance } from 'fastify'
-import { createHash } from 'crypto'
 import { db } from '../../db/index'
 import { runAudit, getLiveStats } from '../audit'
 
@@ -38,13 +37,12 @@ export const auditRoutes = async (server: FastifyInstance) => {
   })
 
   // Public ledger entries — no auth required
-  // Returns all entries with their individual SHA-256 entry_hash for independent verification
+  // entry_hash and prev_hash are stored in DB at write time, no recomputation needed
   server.get('/audit/ledger', async (request, reply) => {
     try {
-      // Must be ASC so we can compute the hash chain in order
       const entries = await db('ledger as l')
         .join('merchants as m', 'l.merchant_id', 'm.id')
-        .orderBy('l.created_at', 'asc')
+        .orderBy('l.created_at', 'desc')
         .select(
           'l.id',
           'l.user_id',
@@ -54,33 +52,24 @@ export const auditRoutes = async (server: FastifyInstance) => {
           'l.merchant_receives',
           'l.user_balance_after',
           'l.created_at',
+          'l.entry_hash',
+          'l.prev_hash',
           'm.name as merchant_name'
         )
 
-      // Compute per-entry hash using the same formula as audit.ts
-      // SHA256(id | user_id | merchant_id | amount | fee | timestamp | prev_hash)
-      let previousHash = '0000000000000000'
-      const enriched = entries.map(entry => {
-        const amount = Number(entry.amount)
-        const fee    = Number(entry.platform_fee)
-        const data   = `${entry.id}|${entry.user_id}|${entry.merchant_id}|${amount}|${fee}|${entry.created_at}|${previousHash}`
-        const entryHash = createHash('sha256').update(data).digest('hex')
-        previousHash = entryHash
-        return {
-          id:                entry.id,
-          merchant_name:     entry.merchant_name,
-          amount:            amount,
-          platform_fee:      fee,
-          merchant_receives: Number(entry.merchant_receives),
-          user_balance_after: Number(entry.user_balance_after),
-          created_at:        entry.created_at,
-          prev_hash:         previousHash === entryHash ? '0000000000000000' : previousHash,
-          entry_hash:        entryHash
-        }
-      })
+      const mapped = entries.map((e: any) => ({
+        id:                 e.id,
+        merchant_name:      e.merchant_name,
+        amount:             Number(e.amount),
+        platform_fee:       Number(e.platform_fee),
+        merchant_receives:  Number(e.merchant_receives),
+        user_balance_after: Number(e.user_balance_after),
+        created_at:         e.created_at,
+        prev_hash:          e.prev_hash  || '0000000000000000',
+        entry_hash:         e.entry_hash || null
+      }))
 
-      // Return newest-first for display, but hashes are computed oldest-first (correct)
-      return reply.send({ entries: enriched.reverse(), total: enriched.length })
+      return reply.send({ entries: mapped, total: mapped.length })
     } catch (err) {
       console.error('Ledger fetch failed:', err)
       return reply.status(500).send({ error: 'Failed to fetch ledger entries' })
