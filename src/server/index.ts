@@ -18,6 +18,7 @@ import rawBody from 'fastify-raw-body'
 import { payoutRoutes } from './routes/payouts'
 import { runAudit } from './audit'
 import { auditRoutes } from './routes/audit'
+import { recordRequest, recordActiveUser, recordPageView } from './traffic'
 
 dotenv.config({ path: resolve(process.cwd(), '.env') })
 
@@ -137,6 +138,22 @@ const start = async () => {
           })
         }
       }
+    })
+
+    // ── Traffic monitoring hook ───────────────────────────────────────────────
+    server.addHook('onResponse', (request, reply, done) => {
+      const latency = Math.round(reply.elapsedTime ?? 0)
+      recordRequest(request.method, request.url, reply.statusCode, latency)
+      const userId = (request as any).user_id
+      if (userId) recordActiveUser(userId)
+      done()
+    })
+
+    // Page view tracker — called by frontend pages on load (no auth, no PII)
+    server.post('/metrics/pageview', async (request, reply) => {
+      const { page } = request.body as { page?: string }
+      if (page) recordPageView(page)
+      return reply.status(204).send()
     })
 
     server.register(merchantRoutes)

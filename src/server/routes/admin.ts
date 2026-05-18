@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../../db/index'
+import { getTrafficStats } from '../traffic'
 
 const ADMIN_SECRET = process.env.ADMIN_SECRET || 'synthpay_admin_2026'
 
@@ -426,5 +427,10 @@ export const adminRoutes = async (server: FastifyInstance) => {
         chain_hash:   auditLatest?.chain_hash ? (auditLatest.chain_hash as string).slice(0, 16) + '…' : null,
       },
     })
+  })
+
+  // ── Live traffic stats ────────────────────────────────────────────────────
+  server.get('/admin/traffic', { preHandler: requireAdmin }, async (request, reply) => {
+    return reply.send(getTrafficStats())
   })
 }
