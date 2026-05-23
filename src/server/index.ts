@@ -80,6 +80,50 @@ const start = async () => {
     await runMigrations()
     await runSeed()
 
+    // Favicon
+    server.get('/favicon.svg', async (_request, reply) => {
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <rect width="32" height="32" rx="6" fill="#0A0906"/>
+  <text x="16" y="24" font-family="Arial Black, Arial, sans-serif" font-weight="900" font-size="22" fill="#F0A500" text-anchor="middle">T</text>
+</svg>`
+      return reply.type('image/svg+xml').send(svg)
+    })
+
+    // Root — branded status page
+    server.get('/', async (_request, reply) => {
+      const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TrustLedger — API Billing Infrastructure</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  body { margin: 0; background: #0A0906; color: #F0EEE8; font-family: 'DM Sans', system-ui, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  .wrap { text-align: center; }
+  .logo { font-size: 48px; font-weight: 900; color: #F0A500; letter-spacing: -2px; margin-bottom: 8px; }
+  .sub { font-size: 13px; color: #7A7670; letter-spacing: 3px; font-family: monospace; margin-bottom: 32px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #10b981; margin-right: 8px; vertical-align: middle; }
+  .status { font-size: 13px; color: #C8C4BC; }
+  a { color: #F0A500; text-decoration: none; font-size: 13px; margin: 0 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="logo">T</div>
+  <div class="sub">TRUSTLEDGER · API BILLING INFRASTRUCTURE</div>
+  <p class="status"><span class="dot"></span>All systems operational</p>
+  <p style="margin-top: 24px;">
+    <a href="/health">Health</a>
+    <a href="https://www.synthpay.tech">SynthPay</a>
+    <a href="https://dashboard.synthpay.tech">Dashboard</a>
+  </p>
+</div>
+</body>
+</html>`
+      return reply.type('text/html').send(html)
+    })
+
     // Health check
     server.get('/health', async () => {
       const dbAlive = await testConnection()
