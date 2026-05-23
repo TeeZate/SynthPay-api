@@ -127,6 +127,136 @@ export const merchantRoutes = async (server: FastifyInstance) => {
     })
   })
 
+  // ── Merchant analytics ────────────────────────────────────────────────────
+  server.get('/merchants/analytics', async (request, reply) => {
+    const api_key = request.headers['x-api-key'] as string
+    if (!api_key) return reply.status(401).send({ error: 'API key required' })
+
+    const merchant = await db('merchants').where({ api_key, active: true }).first()
+    if (!merchant) return reply.status(401).send({ error: 'Invalid API key' })
+
+    const now       = new Date()
+    const ago24h    = new Date(now.getTime() - 24 * 60 * 60 * 1000)
+    const ago7d     = new Date(now.getTime() - 7  * 24 * 60 * 60 * 1000)
+    const ago30d    = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+    const todayStart = new Date(now); todayStart.setHours(0,0,0,0)
+    const yesterdayStart = new Date(todayStart.getTime() - 86400000)
+
+    const [
+      endpoints,
+      endpointStats,
+      endpointStats7d,
+      endpointStats24h,
+      daily,
+      todaySummary,
+      yesterdaySummary,
+      week7d,
+    ] = await Promise.all([
+      // All endpoints
+      db('endpoints')
+        .where({ merchant_id: merchant.id })
+        .select('id', 'path', 'price', 'active', 'service_name', 'description', 'category')
+        .orderBy('created_at', 'asc'),
+
+      // All-time per-endpoint stats
+      db('ledger')
+        .where({ merchant_id: merchant.id })
+        .groupBy('endpoint_id')
+        .select(
+          'endpoint_id',
+          db.raw('COUNT(*) as calls'),
+          db.raw('SUM(merchant_receives) as revenue'),
+          db.raw('MAX(created_at) as last_call_at')
+        ),
+
+      // 7d per-endpoint
+      db('ledger')
+        .where({ merchant_id: merchant.id })
+        .where('created_at', '>=', ago7d)
+        .groupBy('endpoint_id')
+        .select('endpoint_id', db.raw('COUNT(*) as calls'), db.raw('SUM(merchant_receives) as revenue')),
+
+      // 24h per-endpoint
+      db('ledger')
+        .where({ merchant_id: merchant.id })
+        .where('created_at', '>=', ago24h)
+        .groupBy('endpoint_id')
+        .select('endpoint_id', db.raw('COUNT(*) as calls'), db.raw('SUM(merchant_receives) as revenue')),
+
+      // Daily breakdown — last 30 days
+      db('ledger')
+        .where({ merchant_id: merchant.id })
+        .where('created_at', '>=', ago30d)
+        .select(
+          db.raw("DATE(created_at) as date"),
+          db.raw('COUNT(*) as calls'),
+          db.raw('SUM(merchant_receives) as revenue')
+        )
+        .groupByRaw("DATE(created_at)")
+        .orderBy('date', 'asc'),
+
+      // Today
+      db('ledger').where({ merchant_id: merchant.id }).where('created_at', '>=', todayStart)
+        .select(db.raw('COUNT(*) as calls'), db.raw('SUM(merchant_receives) as revenue')).first(),
+
+      // Yesterday
+      db('ledger').where({ merchant_id: merchant.id })
+        .where('created_at', '>=', yesterdayStart).where('created_at', '<', todayStart)
+        .select(db.raw('COUNT(*) as calls'), db.raw('SUM(merchant_receives) as revenue')).first(),
+
+      // 7d total
+      db('ledger').where({ merchant_id: merchant.id }).where('created_at', '>=', ago7d)
+        .select(db.raw('COUNT(*) as calls'), db.raw('SUM(merchant_receives) as revenue')).first(),
+    ])
+
+    // Merge endpoint stats
+    const statsMap    = Object.fromEntries(endpointStats.map((r: any)   => [r.endpoint_id, r]))
+    const stats7dMap  = Object.fromEntries(endpointStats7d.map((r: any) => [r.endpoint_id, r]))
+    const stats24hMap = Object.fromEntries(endpointStats24h.map((r: any)=> [r.endpoint_id, r]))
+
+    const enrichedEndpoints = endpoints.map((ep: any) => {
+      const all  = statsMap[ep.id]   || {}
+      const s7d  = stats7dMap[ep.id] || {}
+      const s24h = stats24hMap[ep.id]|| {}
+      const totalCalls = Number(all.calls || 0)
+      return {
+        ...ep,
+        price:          Number(ep.price),
+        calls_total:    totalCalls,
+        calls_7d:       Number(s7d.calls   || 0),
+        calls_24h:      Number(s24h.calls  || 0),
+        revenue_total:  Number(all.revenue  || 0),
+        revenue_7d:     Number(s7d.revenue  || 0),
+        revenue_24h:    Number(s24h.revenue || 0),
+        last_call_at:   all.last_call_at || null,
+        avg_revenue_per_call: totalCalls > 0 ? Number(all.revenue || 0) / totalCalls : Number(ep.price),
+      }
+    }).sort((a: any, b: any) => b.calls_total - a.calls_total)
+
+    return reply.send({
+      merchant: {
+        id:           merchant.id,
+        name:         merchant.name,
+        balance:      Number(merchant.balance),
+        total_earned: Number(merchant.total_earned),
+      },
+      summary: {
+        today_calls:       Number(todaySummary?.calls    || 0),
+        today_revenue:     Number(todaySummary?.revenue  || 0),
+        yesterday_calls:   Number(yesterdaySummary?.calls   || 0),
+        yesterday_revenue: Number(yesterdaySummary?.revenue || 0),
+        week_calls:        Number(week7d?.calls    || 0),
+        week_revenue:      Number(week7d?.revenue  || 0),
+      },
+      endpoints: enrichedEndpoints,
+      daily: daily.map((d: any) => ({
+        date:    d.date,
+        calls:   Number(d.calls),
+        revenue: Number(d.revenue),
+      })),
+    })
+  })
+
   // ── Update an endpoint (price, active, service_name, description, category) ─
   server.patch('/merchants/endpoints/:id', async (request, reply) => {
     const { id } = request.params as { id: string }
