@@ -83,10 +83,68 @@ const start = async () => {
     // Favicon
     server.get('/favicon.svg', async (_request, reply) => {
       const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
-  <rect width="32" height="32" rx="6" fill="#0A0906"/>
-  <text x="16" y="24" font-family="Arial Black, Arial, sans-serif" font-weight="900" font-size="22" fill="#F0A500" text-anchor="middle">T</text>
+  <rect width="32" height="32" rx="6" fill="#FFFFFF"/>
+  <text x="14" y="24" font-family="Arial Black, Arial, sans-serif" font-weight="900" font-size="22" fill="#0D0C0A" text-anchor="middle">S</text>
+  <circle cx="25" cy="7" r="4" fill="#F59B00"/>
 </svg>`
       return reply.type('image/svg+xml').send(svg)
+    })
+
+    // Monitor page
+    server.get('/monitor.html', async (_request, reply) => {
+      const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SynthPay · System Monitor</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700&family=DM+Mono:wght@400;500&display=swap');
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#0A0906;color:#F0EEE8;font-family:'DM Sans',system-ui,sans-serif;padding:32px 24px;min-height:100vh}
+  h1{font-family:'DM Mono',monospace;font-size:11px;letter-spacing:3px;color:#7A7670;margin-bottom:24px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:32px}
+  .card{background:#111009;border:1px solid #222018;border-radius:12px;padding:20px}
+  .card-label{font-family:'DM Mono',monospace;font-size:9px;letter-spacing:2px;color:#7A7670;margin-bottom:8px}
+  .card-value{font-size:22px;font-weight:700;color:#F0EEE8}
+  .card-value.green{color:#10b981}
+  .card-value.amber{color:#F0A500}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+  .dot.green{background:#10b981} .dot.red{background:#ef4444}
+  a{color:#F0A500;font-family:'DM Mono',monospace;font-size:11px;text-decoration:none}
+</style>
+</head>
+<body>
+<h1>SYNTHPAY · SYSTEM MONITOR</h1>
+<div class="grid" id="grid">
+  <div class="card"><div class="card-label">API STATUS</div><div class="card-value green" id="api-status">Checking...</div></div>
+  <div class="card"><div class="card-label">DATABASE</div><div class="card-value" id="db-status">Checking...</div></div>
+  <div class="card"><div class="card-label">TIMESTAMP</div><div class="card-value amber" id="timestamp" style="font-size:13px;font-family:monospace">—</div></div>
+</div>
+<p><a href="/">← Back</a> &nbsp;&nbsp; <a href="/health">Raw health JSON</a></p>
+<script>
+  async function check() {
+    try {
+      const r = await fetch('/health')
+      const d = await r.json()
+      document.getElementById('api-status').innerHTML = '<span class="dot green"></span>Operational'
+      const db = document.getElementById('db-status')
+      db.innerHTML = d.database === 'connected'
+        ? '<span class="dot green"></span>Connected'
+        : '<span class="dot red"></span>Disconnected'
+      db.className = 'card-value ' + (d.database === 'connected' ? 'green' : '')
+      document.getElementById('timestamp').textContent = new Date(d.timestamp).toLocaleString()
+    } catch {
+      document.getElementById('api-status').innerHTML = '<span class="dot red"></span>Unreachable'
+    }
+  }
+  check()
+  setInterval(check, 30000)
+</script>
+</body>
+</html>`
+      return reply.type('text/html').send(html)
     })
 
     // Root — branded status page
