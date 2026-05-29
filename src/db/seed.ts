@@ -18,12 +18,12 @@ const DEMO_MERCHANTS = [
     ],
   },
   {
-    name: 'BeIN Sports Pay',
+    name: 'ArenaPass',
     endpoints: [
       {
         path:         '/sports/access',
         price:        0.05,
-        service_name: 'BeIN Sports Pay',
+        service_name: 'ArenaPass',
         description:  'Live sport and replay coverage — football, basketball, cricket and more. Pay per match or highlight reel.',
         category:     'Media',
       },
