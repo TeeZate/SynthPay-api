@@ -1,13 +1,16 @@
 import { FastifyInstance } from 'fastify'
+import { timingSafeEqual } from 'crypto'
 import { db } from '../../db/index'
 import { getTrafficStats } from '../traffic'
 
-const ADMIN_SECRET = process.env.ADMIN_SECRET || 'synthpay_admin_2026'
+const ADMIN_SECRET = process.env.ADMIN_SECRET || ''
 
 // ── Admin auth middleware ─────────────────────────────────────────────────────
 async function requireAdmin(request: any, reply: any) {
-  const secret = request.headers['x-admin-secret'] as string
-  if (!secret || secret !== ADMIN_SECRET) {
+  const secret = (request.headers['x-admin-secret'] as string) || ''
+  const a = Buffer.from(secret)
+  const b = Buffer.from(ADMIN_SECRET)
+  if (!ADMIN_SECRET || a.length !== b.length || !timingSafeEqual(a, b)) {
     return reply.status(401).send({ error: 'Unauthorized' })
   }
 }

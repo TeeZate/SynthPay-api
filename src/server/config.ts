@@ -13,6 +13,7 @@ const required = [
   'STRIPE_SECRET_KEY',
   'STRIPE_WEBHOOK_SECRET',
   'PLATFORM_FEE',
+  'ADMIN_SECRET',
 ]
 
 export function validateEnv() {
