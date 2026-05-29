@@ -434,18 +434,4 @@ export const adminRoutes = async (server: FastifyInstance) => {
     return reply.send(getTrafficStats())
   })
 
-  // ── TEMP: rename merchants (remove after use) ─────────────────────────────
-  server.post('/admin/rename-merchants', { preHandler: requireAdmin }, async (request, reply) => {
-    const renames = [
-      { from: 'Netflix',         to: 'StreamVault' },
-      { from: 'BeIN Sports Pay', to: 'ArenaPass' },
-      { from: 'RapidAPI',        to: 'SwiftAPI' },
-    ]
-    const results = []
-    for (const r of renames) {
-      const updated = await db('merchants').where({ name: r.from }).update({ name: r.to })
-      results.push({ ...r, updated })
-    }
-    return reply.send({ results })
-  })
 }
