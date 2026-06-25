@@ -18,6 +18,7 @@ import rawBody from 'fastify-raw-body'
 import { payoutRoutes } from './routes/payouts'
 import { runAudit } from './audit'
 import { auditRoutes } from './routes/audit'
+import { chargeRoutes } from './routes/charge'
 import { recordRequest, recordActiveUser, recordPageView } from './traffic'
 
 dotenv.config({ path: resolve(process.cwd(), '.env') })
@@ -45,6 +46,7 @@ const start = async () => {
         'https://www.synthpay.tech',
         'https://synthpay.tech',
         'https://trustledger.up.railway.app',
+        'https://friendly-zabaione-df94d4.netlify.app',
         'http://localhost:5174',
         'http://localhost:5175',
         'http://localhost:5176',
@@ -264,6 +266,7 @@ const start = async () => {
     server.register(walletRoutes)
     server.register(payoutRoutes)
     server.register(auditRoutes)
+    server.register(chargeRoutes)
     server.register(adminRoutes)
 
     // Nightly audit — runs at midnight every day

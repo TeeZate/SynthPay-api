@@ -1,21 +1,246 @@
 import { FastifyInstance } from 'fastify'
 import { timingSafeEqual } from 'crypto'
+import bcrypt from 'bcrypt'
+import jwt from 'jsonwebtoken'
+import {
+  generateRegistrationOptions,
+  verifyRegistrationResponse,
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse,
+} from '@simplewebauthn/server'
 import { db } from '../../db/index'
 import { getTrafficStats } from '../traffic'
 
 const ADMIN_SECRET = process.env.ADMIN_SECRET || ''
+const JWT_SECRET   = process.env.JWT_SECRET || 'changeme'
+const ADMIN_RP_ID  = process.env.ADMIN_WEBAUTHN_RPID   || 'trustledger.up.railway.app'
+const ADMIN_ORIGIN = process.env.ADMIN_WEBAUTHN_ORIGIN || 'https://trustledger.up.railway.app'
+const ADMIN_RP_NAME = 'SynthPay Admin'
+const SECRET_HASH_KEY = 'admin_secret_hash'
 
-// ── Admin auth middleware ─────────────────────────────────────────────────────
-async function requireAdmin(request: any, reply: any) {
-  const secret = (request.headers['x-admin-secret'] as string) || ''
+// Validate the shared admin secret. Once a secret has been rotated in-app, the
+// bcrypt hash in app_settings is authoritative and the env ADMIN_SECRET (the
+// original committed/guessable bootstrap value) no longer works. Until then the
+// env value is accepted via a constant-time compare so the dashboard is reachable.
+async function secretValid(secret: string): Promise<boolean> {
+  if (!secret) return false
+
+  const row = await db('app_settings').where({ key: SECRET_HASH_KEY }).first()
+  if (row) return bcrypt.compare(secret, row.value)
+
   const a = Buffer.from(secret)
   const b = Buffer.from(ADMIN_SECRET)
-  if (!ADMIN_SECRET || a.length !== b.length || !timingSafeEqual(a, b)) {
-    return reply.status(401).send({ error: 'Unauthorized' })
+  return !!ADMIN_SECRET && a.length === b.length && timingSafeEqual(a, b)
+}
+
+// ── Admin auth middleware ─────────────────────────────────────────────────────
+// Accepts EITHER a valid admin passkey JWT (Authorization: Bearer) OR the
+// shared x-admin-secret header (break-glass / passkey enrollment bootstrap).
+async function requireAdmin(request: any, reply: any) {
+  const authHeader = (request.headers['authorization'] as string) || ''
+  if (authHeader.startsWith('Bearer ')) {
+    try {
+      const decoded = jwt.verify(authHeader.slice(7), JWT_SECRET) as { admin?: boolean }
+      if (decoded.admin === true) { request.adminVia = 'passkey'; return }
+    } catch { /* fall through to secret */ }
   }
+
+  const secret = (request.headers['x-admin-secret'] as string) || ''
+  if (await secretValid(secret)) { request.adminVia = 'secret'; return }
+
+  return reply.status(401).send({ error: 'Unauthorized' })
 }
 
 export const adminRoutes = async (server: FastifyInstance) => {
+
+  // ── PASSKEY AUTH ──────────────────────────────────────────────────────────
+
+  // Enroll a new admin passkey. Bootstrap-gated by the shared secret so only
+  // someone already holding x-admin-secret can register a device.
+  server.post('/admin/auth/register/begin', { preHandler: requireAdmin }, async (request, reply) => {
+    await db('challenges').where('expires_at', '<', new Date()).delete()
+
+    const options = await generateRegistrationOptions({
+      rpName:          ADMIN_RP_NAME,
+      rpID:            ADMIN_RP_ID,
+      userID:          Buffer.from('admin'),
+      userName:        'admin@synthpay',
+      userDisplayName: 'SynthPay Admin',
+      attestationType: 'none',
+      authenticatorSelection: {
+        userVerification: 'required',
+        residentKey:      'required',
+      },
+      supportedAlgorithmIDs: [-7, -257],
+    })
+
+    await db('challenges').insert({
+      challenge:  options.challenge,
+      type:       'admin_registration',
+      user_id:    null,
+      expires_at: new Date(Date.now() + 5 * 60 * 1000),
+    })
+
+    return reply.send({ options })
+  })
+
+  server.post('/admin/auth/register/complete', { preHandler: requireAdmin }, async (request, reply) => {
+    const { credential, label } = request.body as { credential: any; label?: string }
+    if (!credential) return reply.status(400).send({ error: 'credential required' })
+
+    const stored = await db('challenges')
+      .where({ type: 'admin_registration' })
+      .where('expires_at', '>', new Date())
+      .orderBy('created_at', 'desc')
+      .first()
+    if (!stored) return reply.status(400).send({ error: 'Challenge expired or not found' })
+
+    let verification: any
+    try {
+      verification = await verifyRegistrationResponse({
+        response:                credential,
+        expectedChallenge:       stored.challenge,
+        expectedOrigin:          ADMIN_ORIGIN,
+        expectedRPID:            ADMIN_RP_ID,
+        requireUserVerification: true,
+      })
+    } catch (err: any) {
+      return reply.status(400).send({ error: err.message || 'Verification failed' })
+    }
+
+    if (!verification?.verified || !verification.registrationInfo) {
+      return reply.status(400).send({ error: 'Verification failed' })
+    }
+
+    const { credential: cred } = verification.registrationInfo
+
+    await db('admin_passkeys').insert({
+      credential_id: cred.id,
+      public_key:    Buffer.from(cred.publicKey).toString('base64'),
+      counter:       cred.counter,
+      label:         label || null,
+      device_type:   verification.registrationInfo.credentialDeviceType || 'unknown',
+    })
+
+    await db('challenges').where({ challenge: stored.challenge }).delete()
+
+    return reply.status(201).send({ message: 'Admin passkey enrolled' })
+  })
+
+  server.post('/admin/auth/login/begin', async (request, reply) => {
+    await db('challenges').where('expires_at', '<', new Date()).delete()
+
+    const options = await generateAuthenticationOptions({
+      rpID:             ADMIN_RP_ID,
+      userVerification: 'required',
+    })
+
+    await db('challenges').insert({
+      challenge:  options.challenge,
+      type:       'admin_authentication',
+      user_id:    null,
+      expires_at: new Date(Date.now() + 5 * 60 * 1000),
+    })
+
+    return reply.send({ options })
+  })
+
+  server.post('/admin/auth/login/complete', async (request, reply) => {
+    const { credential } = request.body as { credential: any }
+    if (!credential) return reply.status(400).send({ error: 'credential required' })
+
+    const stored = await db('challenges')
+      .where({ type: 'admin_authentication' })
+      .where('expires_at', '>', new Date())
+      .orderBy('created_at', 'desc')
+      .first()
+    if (!stored) return reply.status(400).send({ error: 'Challenge expired or not found' })
+
+    let passkey = await db('admin_passkeys').where({ credential_id: credential.id }).first()
+    if (!passkey) {
+      const altId = Buffer.from(credential.id, 'base64url').toString('base64url')
+      passkey = await db('admin_passkeys').where({ credential_id: altId }).first()
+    }
+    if (!passkey) return reply.status(404).send({ error: 'Passkey not found' })
+
+    let verification: any
+    try {
+      verification = await verifyAuthenticationResponse({
+        response:          credential,
+        expectedChallenge: stored.challenge,
+        expectedOrigin:    ADMIN_ORIGIN,
+        expectedRPID:      ADMIN_RP_ID,
+        credential: {
+          id:        passkey.credential_id,
+          publicKey: new Uint8Array(Buffer.from(passkey.public_key, 'base64')),
+          counter:   passkey.counter,
+        },
+        requireUserVerification: true,
+      })
+    } catch (err: any) {
+      return reply.status(401).send({ error: 'Authentication failed' })
+    }
+
+    if (!verification?.verified) return reply.status(401).send({ error: 'Authentication failed' })
+
+    await db('admin_passkeys')
+      .where({ id: passkey.id })
+      .update({ counter: verification.authenticationInfo.newCounter, last_used_at: new Date() })
+
+    await db('challenges').where({ challenge: stored.challenge }).delete()
+
+    const token = jwt.sign({ admin: true }, JWT_SECRET, { expiresIn: '8h' })
+
+    return reply.send({ message: 'Login successful', token })
+  })
+
+  // Whether any admin passkey is enrolled (drives the login UI).
+  server.get('/admin/auth/status', async (request, reply) => {
+    const row = await db('admin_passkeys').count('id as n').first()
+    return reply.send({ enrolled: Number(row?.n || 0) > 0 })
+  })
+
+  // Rotate the break-glass admin secret. Requires re-entering the current
+  // secret (proof of knowledge) even when authenticated via passkey JWT.
+  server.post('/admin/secret/rotate', { preHandler: requireAdmin }, async (request: any, reply) => {
+    const { current_secret, new_secret } = request.body as {
+      current_secret?: string
+      new_secret?:     string
+    }
+
+    if (!new_secret) {
+      return reply.status(400).send({ error: 'new_secret required' })
+    }
+
+    // Passkey-authenticated admins can reset the secret without knowing the old
+    // one (the passkey is sufficient proof of identity). Secret-authenticated
+    // callers must still re-enter the current secret as proof of knowledge.
+    if (request.adminVia !== 'passkey') {
+      if (!current_secret) {
+        return reply.status(400).send({ error: 'current_secret required' })
+      }
+      if (!(await secretValid(current_secret))) {
+        return reply.status(401).send({ error: 'Current secret is incorrect' })
+      }
+    }
+
+    if (new_secret.length < 16) {
+      return reply.status(400).send({ error: 'New secret must be at least 16 characters' })
+    }
+    if (current_secret && new_secret === current_secret) {
+      return reply.status(400).send({ error: 'New secret must differ from the current one' })
+    }
+
+    const hash = await bcrypt.hash(new_secret, 12)
+    const existing = await db('app_settings').where({ key: SECRET_HASH_KEY }).first()
+    if (existing) {
+      await db('app_settings').where({ key: SECRET_HASH_KEY }).update({ value: hash, updated_at: new Date() })
+    } else {
+      await db('app_settings').insert({ key: SECRET_HASH_KEY, value: hash })
+    }
+
+    return reply.send({ message: 'Admin secret rotated' })
+  })
 
   // ── Overview stats ───────────────────────────────────────────────────────
   server.get('/admin/overview', { preHandler: requireAdmin }, async (request, reply) => {

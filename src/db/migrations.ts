@@ -201,5 +201,54 @@ export const runMigrations = async () => {
   }
 
 
+  // 9. ADMIN_PASSKEYS — passkeys for admin dashboard access (separate from wallet users)
+  const hasAdminPasskeys = await db.schema.hasTable('admin_passkeys')
+  if (!hasAdminPasskeys) {
+    await db.schema.createTable('admin_passkeys', (t) => {
+      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'))
+      t.string('credential_id').notNullable().unique()
+      t.text('public_key').notNullable()
+      t.bigInteger('counter').notNullable().defaultTo(0)
+      t.string('label').nullable()
+      t.string('device_type').nullable()
+      t.timestamp('last_used_at').nullable()
+      t.timestamps(true, true)
+    })
+    console.log('✅ admin_passkeys table created')
+  }
+
+  // 10. APP_SETTINGS — small key/value store for runtime-mutable config (e.g. rotated admin secret hash)
+  const hasAppSettings = await db.schema.hasTable('app_settings')
+  if (!hasAppSettings) {
+    await db.schema.createTable('app_settings', (t) => {
+      t.string('key').primary()
+      t.text('value').notNullable()
+      t.timestamp('updated_at').notNullable().defaultTo(db.fn.now())
+    })
+    console.log('✅ app_settings table created')
+  }
+
+  // 11. CHECKOUT_SESSIONS — hosted pay-per-use checkout (Stripe-Checkout style)
+  // A merchant creates a session; the viewer approves + pays on SynthPay's own
+  // page; the merchant only ever learns paid/not-paid.
+  const hasCheckoutSessions = await db.schema.hasTable('checkout_sessions')
+  if (!hasCheckoutSessions) {
+    await db.schema.createTable('checkout_sessions', (t) => {
+      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'))
+      t.uuid('merchant_id').notNullable().references('id').inTable('merchants')
+      t.uuid('endpoint_id').notNullable().references('id').inTable('endpoints')
+      t.decimal('amount', 18, 8).notNullable()
+      t.string('status').notNullable().defaultTo('pending') // pending | paid | failed | expired
+      t.uuid('user_id').nullable().references('id').inTable('users') // who paid (set on success)
+      t.uuid('ledger_id').nullable()        // the resulting ledger entry
+      t.text('return_url').nullable()       // where to send the viewer back
+      t.text('reference').nullable()        // merchant's own correlation id
+      t.timestamp('expires_at').notNullable()
+      t.timestamp('paid_at').nullable()
+      t.timestamp('created_at').notNullable().defaultTo(db.fn.now())
+    })
+    console.log('✅ checkout_sessions table created')
+  }
+
   console.log('✅ All tables ready')
 }
